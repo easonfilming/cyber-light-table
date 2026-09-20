@@ -430,6 +430,7 @@ class EffectsDialog(tk.Toplevel):
         self.labels: dict[str, tk.Label] = {}
         self._photo = None
         self._job = None
+        self._busy = False
 
         self.title("胶片特效")
         self.configure(bg=theme.BG)
@@ -497,7 +498,17 @@ class EffectsDialog(tk.Toplevel):
             lbl.configure(text="关" if v <= 0 else str(v),
                           fg=theme.DIM if v <= 0 else theme.ACCENT)
 
-    def _changed(self, _key):
+    def _changed(self, key):
+        # 互斥的效果（乐凯红 / 乐凯绿）：开了这个就把那个清零。
+        # 改动会再触发一次回调，所以用 _busy 挡一下，别递归。
+        if not self._busy:
+            self._busy = True
+            try:
+                for k, v in effects_mod.exclusive_fix(self.current(), key).items():
+                    if int(self.vars[k].get()) != v:
+                        self.vars[k].set(v)
+            finally:
+                self._busy = False
         self._sync_labels()
         self._schedule()
 

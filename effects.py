@@ -8,23 +8,29 @@
 """
 from __future__ import annotations
 
-import math
 import random
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 # (键, 名字, 说明, 默认强度)
 EFFECTS = [
-    ("leak",     "漏光", "边缘漏进一片暖光，像相机后盖没盖严", 0),
+    ("leak",     "漏光", "边缘射进来一道强光，像相机后盖没盖严", 0),
     ("grain",    "颗粒", "胶片的颗粒感，暗部尤其明显", 0),
     ("scratch",  "划痕", "片基上细细的划痕", 0),
     ("faded",    "褪色", "褪色发暖、黑位发灰，像过期胶卷", 0),
     ("vignette", "暗角", "四角压暗，像老镜头的暗角", 0),
+    ("lucky_r",  "乐凯红", "整卷底色偏品红，像乐凯彩色负片", 0),
+    ("lucky_g",  "乐凯绿", "整卷底色发黄绿", 0),
 ]
 NAMES = [k for k, *_ in EFFECTS]
 
-# 漏光用的暖色（偏橙红，真漏光就这个色）
-LEAK_COLORS = [(255, 138, 48), (255, 96, 40), (255, 186, 92), (250, 120, 60)]
+# 互斥的效果：同一卷不可能既偏品红又偏黄绿
+EXCLUSIVE = [("lucky_r", "lucky_g")]
+
+# 漏光的颜色：芯子过曝发白，外圈才是橙红
+LEAK_CORE = (255, 252, 244)
+LEAK_MID = [(255, 196, 120), (255, 168, 84), (255, 214, 150)]
+LEAK_OUT = [(255, 112, 48), (232, 76, 40), (255, 140, 60)]
 
 _VIGNETTES: dict = {}
 
@@ -48,6 +54,20 @@ def normalize(spec) -> dict:
 def any_on(spec) -> bool:
     spec = normalize(spec)
     return any(v > 0 for v in spec.values())
+
+
+def exclusive_fix(spec: dict, changed: str) -> dict:
+    """互斥的效果：开了这个，就把跟它互斥的那个清零。
+
+    同一卷不可能既偏品红又偏黄绿，所以乐凯红和乐凯绿只能开一个。
+    """
+    out = dict(spec)
+    for group in EXCLUSIVE:
+        if changed in group and out.get(changed, 0) > 0:
+            for other in group:
+                if other != changed:
+                    out[other] = 0
+    return out
 
 
 # ======================================================================
@@ -118,37 +138,81 @@ def _scratches(img: Image.Image, amount: int, rng: random.Random) -> Image.Image
     return img
 
 
+def _band_mask(size, x_center: float, width: float, angle: float) -> Image.Image:
+    """一条斜光带的遮罩。x_center / width 按图片宽度算，angle 是倾角（度）。"""
+    w, h = size
+    m = Image.new("L", size, 0)
+    ImageDraw.Draw(m).rectangle(
+        [x_center - width / 2, -h, x_center + width / 2, h * 2], fill=255)
+    if abs(angle) > 0.1:
+        m = m.rotate(angle, resample=Image.Resampling.BICUBIC)
+    return m
+
+
 def _leak_layer(size, amount: int, rng: random.Random) -> Image.Image:
-    """漏光层：从某一侧边缘漏进来的一片暖光。返回一张和画布同尺寸的 RGB 层。"""
+    """漏光层：从某一侧射进来的一道强光。
+
+    两个关键点：
+      1. **芯子过曝发白、中圈琥珀、外圈才橙红** —— 只有暖色就成了一片滤镜
+      2. **光带要窄、糊的半径要跟带宽成比例** —— 按图宽算的话会糊成一大片渐变，
+         就不像"从缝里射进来"了
+    """
     w, h = size
     layer = Image.new("RGB", size, (0, 0, 0))
-    r = int(max(w, h) * rng.uniform(0.55, 0.85))
-    grad = ImageChops.invert(Image.radial_gradient("L")).resize(
-        (r, r), Image.Resampling.LANCZOS)
 
-    side = rng.choice(["left", "right", "left", "top"])
+    side = rng.choice(["left", "right", "left"])
     if side == "left":
-        px, py = int(-r * 0.45), int(rng.uniform(-r * 0.3, h - r * 0.7))
-    elif side == "right":
-        px, py = int(w - r * 0.55), int(rng.uniform(-r * 0.3, h - r * 0.7))
+        base = w * rng.uniform(-0.01, 0.10)
+        angle = rng.uniform(6, 18)
     else:
-        px, py = int(rng.uniform(-r * 0.3, w - r * 0.7)), int(-r * 0.45)
+        base = w * rng.uniform(0.90, 1.01)
+        angle = -rng.uniform(6, 18)
 
-    color = rng.choice(LEAK_COLORS)
-    blob = Image.new("RGB", (r, r), color)
-    layer.paste(blob, (px, py), grad)
+    def paint(band_w, color, blur_ratio):
+        m = _band_mask(size, base, band_w, angle) \
+            .filter(ImageFilter.GaussianBlur(max(3.0, band_w * blur_ratio)))
+        return Image.composite(Image.new("RGB", size, color), layer, m)
 
-    # 再补一道窄的斜光带，像从缝隙里漏的
+    # 光带宽度按**图高**算（胶片是一条条横的，漏光横着扫过好几条）
+    out_w = h * rng.uniform(0.16, 0.30)
+    layer = paint(out_w, rng.choice(LEAK_OUT), 0.30)          # 外圈：橙红
+    layer = paint(out_w * 0.55, rng.choice(LEAK_MID), 0.22)   # 中圈：琥珀
+    layer = paint(max(5.0, out_w * 0.16), LEAK_CORE, 0.10)    # 芯子：过曝发白
+
+    # 有时候再来一道细的，像另一条缝
     if rng.random() < 0.6:
-        band = Image.new("RGB", (w, h), (0, 0, 0))
-        bd = ImageDraw.Draw(band, "RGBA")
-        bw = int(h * rng.uniform(0.10, 0.22))
-        bx = int(w * rng.uniform(0.05, 0.5))
-        bd.rectangle([bx, 0, bx + bw, h], fill=color + (rng.randint(30, 70),))
-        layer = ImageChops.screen(layer, band)
+        b2 = base + w * rng.uniform(0.05, 0.16) * (1 if side == "left" else -1)
+        w2 = h * rng.uniform(0.03, 0.08)
+        m2 = _band_mask(size, b2, w2, angle * rng.uniform(0.4, 1.4)) \
+            .filter(ImageFilter.GaussianBlur(max(2.0, w2 * 0.35)))
+        layer = ImageChops.screen(
+            layer, Image.composite(Image.new("RGB", size, LEAK_MID[0]),
+                                   Image.new("RGB", size, (0, 0, 0)), m2))
 
     return Image.blend(Image.new("RGB", size, (0, 0, 0)), layer,
-                       min(1.0, amount / 100.0 * 1.15))
+                       min(1.0, amount / 100.0 * 1.25))
+
+
+# 乐凯偏色：通道增益 + 暗部染的色雾（片基本身带色，暗部最明显）
+LUCKY = {
+    "lucky_r": {"gains": (1.16, 0.88, 1.08), "veil": (200, 130, 178)},
+    "lucky_g": {"gains": (0.98, 1.12, 0.82), "veil": (172, 196, 128)},
+}
+
+
+def _lucky(img: Image.Image, amount: int, gains, veil) -> Image.Image:
+    """整卷偏色。强度越大偏得越多，暗部还会染上一层片基的色。"""
+    if amount <= 0:
+        return img
+    a = amount / 100.0
+    chans = []
+    for ch, k in zip(img.split(), gains):
+        kk = 1.0 + (k - 1.0) * a
+        chans.append(ch.point(lambda v, _k=kk: min(255, int(v * _k))))
+    out = Image.merge("RGB", chans)
+    # 暗部染色：越暗染得越多
+    shadow = ImageChops.invert(out.convert("L")).point(lambda v: int(v * a * 0.5))
+    return Image.composite(Image.new("RGB", img.size, veil), out, shadow)
 
 
 # ======================================================================
@@ -177,13 +241,15 @@ def apply(canvas: Image.Image, spec, rows, frames, seed: int = 0) -> Image.Image
             piece = canvas.crop((x, y, x + w, y + h))
             canvas.paste(_apply_frame(piece, spec), (x, y))
 
-    # ---- 整条：颗粒、划痕 ----
-    if spec["grain"] > 0 or spec["scratch"] > 0:
+    # ---- 整条：偏色、颗粒、划痕 ----
+    if any(spec[k] > 0 for k in ("lucky_r", "lucky_g", "grain", "scratch")):
         for box in rows:
             x, y, w, h = box
             if w < 2 or h < 2:
                 continue
             piece = canvas.crop((x, y, x + w, y + h))
+            for key in ("lucky_r", "lucky_g"):
+                piece = _lucky(piece, spec[key], **LUCKY[key])
             piece = _grain(piece, spec["grain"])
             piece = _scratches(piece, spec["scratch"], rng)
             canvas.paste(piece, (x, y))
