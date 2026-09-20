@@ -30,7 +30,8 @@ VERSION = (1, 0, 0, 0)
 # 打包时要一起带上的源文件（程序本身不需要额外数据文件）
 SOURCES = ["main.py", "home.py", "designer.py", "gallery.py", "settings_page.py",
            "exporter.py", "photoview.py", "dropfiles.py", "lighttable.py",
-           "strip.py", "canister.py", "appconfig.py", "theme.py", "project.py"]
+           "strip.py", "canister.py", "effects.py", "appconfig.py", "theme.py",
+           "project.py"]
 
 
 # ======================================================================

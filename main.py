@@ -18,6 +18,7 @@ from tkinter import filedialog, messagebox, simpledialog
 from PIL import Image, ImageOps, ImageTk
 
 import canister as canister_mod
+import effects as effects_mod
 import strip as strip_mod
 import theme
 from appconfig import AppConfig
@@ -92,9 +93,9 @@ class NavRail(tk.Frame):
 class PhotoGrid(tk.Canvas):
     """照片网格：缩略图 + 序号，支持多选、双击看大图、拖动排序。"""
 
-    CELL_W, CELL_H = 150, 124
-    THUMB_W, THUMB_H = 150, 100
-    GAP = 10
+    CELL_W, CELL_H = 106, 96
+    THUMB_W, THUMB_H = 106, 71
+    GAP = 8
     BATCH = 16          # 每批载入多少张缩略图，避免卡界面
 
     def __init__(self, master, on_select=None, on_open=None, on_reorder=None,
@@ -181,8 +182,9 @@ class PhotoGrid(tk.Canvas):
             self.create_text(x + 4, y + self.THUMB_H + 13, text=f"{i + 1:03d}",
                              fill=theme.ACCENT if sel else theme.DIM,
                              anchor="w", font=theme.FONT_MONO)
+            # 格子窄，只显示不带扩展名的文件名，够认就行
             self.create_text(x + self.CELL_W - 4, y + self.THUMB_H + 13,
-                             text=p.display_name[:18], fill=theme.DIM,
+                             text=Path(p.display_name).stem[:12], fill=theme.DIM,
                              anchor="e", font=theme.FONT_SM)
 
         rows = (len(self.photos) + cols - 1) // cols if self.photos else 0
@@ -411,6 +413,150 @@ class ProjectSettingsDialog(tk.Toplevel):
 
 
 # ======================================================================
+# 胶片特效对话框
+# ======================================================================
+FX_PREVIEW_W, FX_PREVIEW_H = 640, 210
+
+
+class EffectsDialog(tk.Toplevel):
+    """挑胶片特效、拖滑块调强度，上面有实时预览。强度 0 就是关掉。"""
+
+    def __init__(self, parent, project: Project, config):
+        super().__init__(parent)
+        self.project = project
+        self.config = config
+        self.result: dict | None = None
+        self.vars: dict[str, tk.IntVar] = {}
+        self.labels: dict[str, tk.Label] = {}
+        self._photo = None
+        self._job = None
+
+        self.title("胶片特效")
+        self.configure(bg=theme.BG)
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        body = tk.Frame(self, bg=theme.BG)
+        body.pack(padx=24, pady=20)
+
+        tk.Label(body, text=f"胶片特效 · {project.name}", bg=theme.BG, fg=theme.TEXT,
+                 font=theme.FONT_TITLE).pack(anchor="w")
+        theme.rule(body, theme.BORDER).pack(fill="x", pady=(10, 14))
+
+        self.canvas = tk.Canvas(body, width=FX_PREVIEW_W, height=FX_PREVIEW_H,
+                                bg=theme.rgb_to_hex(strip_mod.BG),
+                                highlightthickness=1,
+                                highlightbackground=theme.BORDER)
+        self.canvas.pack()
+
+        cur = effects_mod.normalize(project.effects)
+        for key, name, desc, _default in effects_mod.EFFECTS:
+            row = tk.Frame(body, bg=theme.BG)
+            row.pack(fill="x", pady=(12, 0))
+            tk.Label(row, text=name, bg=theme.BG, fg=theme.TEXT, font=theme.FONT_UI,
+                     width=4, anchor="w").pack(side="left")
+            var = tk.IntVar(value=cur[key])
+            self.vars[key] = var
+            tk.Scale(row, from_=0, to=100, orient="horizontal", variable=var,
+                     bg=theme.BG, fg=theme.TEXT, troughcolor=theme.PANEL, bd=0,
+                     highlightthickness=0, showvalue=False, length=190,
+                     activebackground=theme.ACCENT,
+                     command=lambda _v, k=key: self._changed(k)).pack(side="left")
+            lbl = tk.Label(row, text="", bg=theme.BG, fg=theme.ACCENT,
+                           font=theme.FONT_SM, width=4, anchor="w")
+            lbl.pack(side="left", padx=(8, 10))
+            self.labels[key] = lbl
+            tk.Label(row, text=desc, bg=theme.BG, fg=theme.DIM,
+                     font=theme.FONT_SM, anchor="w").pack(side="left")
+
+        tk.Label(body, text="这里只是三格的预览；改完要点「生成胶卷图」才会应用到整卷上。",
+                 bg=theme.BG, fg=theme.DIM, font=theme.FONT_SM).pack(anchor="w",
+                                                                     pady=(16, 0))
+
+        foot = tk.Frame(self, bg=theme.BG)
+        foot.pack(fill="x", padx=24, pady=(0, 20))
+        theme.button(foot, "确定", self._ok, kind="accent").pack(side="right")
+        theme.button(foot, "取消", self.destroy, kind="ghost").pack(side="right",
+                                                                   padx=(0, 8))
+        theme.button(foot, "全部关掉", self._clear, kind="ghost").pack(side="left")
+
+        self._sync_labels()
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.update_idletasks()
+        self.geometry(f"+{parent.winfo_rootx() + 140}+{parent.winfo_rooty() + 90}")
+        self.after(30, self.render_preview)
+
+    # ---------- 数据 ----------
+    def current(self) -> dict:
+        return {k: int(v.get()) for k, v in self.vars.items()}
+
+    def _sync_labels(self):
+        for k, lbl in self.labels.items():
+            v = int(self.vars[k].get())
+            lbl.configure(text="关" if v <= 0 else str(v),
+                          fg=theme.DIM if v <= 0 else theme.ACCENT)
+
+    def _changed(self, _key):
+        self._sync_labels()
+        self._schedule()
+
+    def _clear(self):
+        for v in self.vars.values():
+            v.set(0)
+        self._sync_labels()
+        self._schedule()
+
+    def _schedule(self):
+        if self._job:
+            self.after_cancel(self._job)
+        self._job = self.after(350, self.render_preview)
+
+    # ---------- 预览 ----------
+    def render_preview(self):
+        self._job = None
+        photos = self.project.sorted_photos("added")[:3]
+        if not photos:
+            self.canvas.delete("all")
+            self.canvas.create_text(FX_PREVIEW_W // 2, FX_PREVIEW_H // 2,
+                                    text="项目里还没有照片", fill=theme.FAINT,
+                                    font=theme.FONT_UI)
+            return
+        try:
+            img = strip_mod.render_strip(
+                [p.path(self.project.root) for p in photos],
+                cols=3, cache_dir=self.project.thumbs_dir,
+                fit_mode=self.project.fit_mode,
+                canister=self.project.canister,
+                canister_custom=self.project.canister_custom,
+                canister_library=self.config.library(),
+                effects=self.current())
+        except Exception:
+            return
+        # 只留胶片那一条，把上面的暗盒带裁掉
+        top = strip_mod.HEADER_H + strip_mod.MARGIN
+        row_h = strip_mod.PERF_H * 2 + strip_mod.FRAME_PAD_V * 2 + strip_mod.DEFAULT_THUMB_H
+        img = img.crop((0, max(0, top - 6), img.width, min(img.height, top + row_h + 6)))
+        inner = ImageOps.contain(img, (FX_PREVIEW_W, FX_PREVIEW_H),
+                                 Image.Resampling.LANCZOS)
+        view = Image.new("RGB", (FX_PREVIEW_W, FX_PREVIEW_H), strip_mod.BG)
+        view.paste(inner, ((FX_PREVIEW_W - inner.width) // 2,
+                           (FX_PREVIEW_H - inner.height) // 2))
+        self._photo = ImageTk.PhotoImage(view)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
+
+    # ---------- 收尾 ----------
+    def _ok(self):
+        self.result = self.current()
+        self.destroy()
+
+    def show(self):
+        self.wait_window(self)
+        return self.result
+
+
+# ======================================================================
 # 工作区
 # ======================================================================
 class Workspace(tk.Frame):
@@ -439,8 +585,9 @@ class Workspace(tk.Frame):
 
         left = tk.Frame(panes, bg=theme.PANEL)
         right = tk.Frame(panes, bg=theme.BG)
-        panes.add(left, minsize=360, stretch="always")
-        panes.add(right, minsize=560, stretch="always")
+        # 左栏窄一点固定住，窗口变大时多出来的空间全给观片台
+        panes.add(left, width=360, minsize=300, stretch="never")
+        panes.add(right, minsize=640, stretch="always")
 
         self._build_photos(left)
         self._build_preview(right)
@@ -463,6 +610,9 @@ class Workspace(tk.Frame):
             side="left", padx=6, pady=10)
         theme.button(bar, "项目设置…", self.open_project_settings, kind="ghost").pack(
             side="left", padx=6, pady=10)
+        self.btn_fx = theme.button(bar, "胶片特效…", self.open_effects, kind="ghost")
+        self.btn_fx.pack(side="left", padx=6, pady=10)
+        self._sync_fx_button()
 
         # 暗盒下拉框：内置 + 保存的 + 去设计
         self.var_canister = tk.StringVar()
@@ -475,27 +625,26 @@ class Workspace(tk.Frame):
 
     def _build_photos(self, parent):
         bar = tk.Frame(parent, bg=theme.PANEL)
-        bar.pack(fill="x", padx=12, pady=(10, 6))
-        tk.Label(bar, text="照片", bg=theme.PANEL, fg=theme.DIM,
-                 font=theme.FONT_UI).pack(side="left")
+        bar.pack(fill="x", padx=10, pady=(8, 4))
+        # 这一栏窄，标签能省就省
         self.lbl_count = tk.Label(bar, text="", bg=theme.PANEL, fg=theme.ACCENT,
-                                  font=theme.FONT_UI)
-        self.lbl_count.pack(side="left", padx=10)
+                                  font=theme.FONT_SM)
+        self.lbl_count.pack(side="left")
 
         self.var_fit = tk.StringVar(value=FIT_LABELS[self.project.fit_mode])
         theme.option_menu(bar, self.var_fit, list(FIT_LABELS.values()),
-                          self._on_fit, width=10).pack(side="right")
+                          self._on_fit, width=9).pack(side="right")
         tk.Label(bar, text="显示", bg=theme.PANEL, fg=theme.DIM,
-                 font=theme.FONT_SM).pack(side="right", padx=(0, 5))
+                 font=theme.FONT_SM).pack(side="right", padx=(0, 4))
 
         self.var_sort = tk.StringVar(value=SORT_LABELS["added"])
         theme.option_menu(bar, self.var_sort, list(SORT_LABELS.values()),
-                          self._on_sort, width=9).pack(side="right", padx=(0, 12))
+                          self._on_sort, width=8).pack(side="right", padx=(0, 10))
         tk.Label(bar, text="排序", bg=theme.PANEL, fg=theme.DIM,
-                 font=theme.FONT_SM).pack(side="right", padx=(0, 5))
+                 font=theme.FONT_SM).pack(side="right", padx=(0, 4))
 
         holder = tk.Frame(parent, bg=theme.PANEL)
-        holder.pack(fill="both", expand=True, padx=(12, 0), pady=(0, 12))
+        holder.pack(fill="both", expand=True, padx=(10, 0), pady=(0, 10))
         sb = tk.Scrollbar(holder, orient="vertical", bd=0, relief="flat",
                           bg=theme.FIELD, troughcolor=theme.PANEL, width=12)
         self.grid = PhotoGrid(holder, on_select=self._on_select,
@@ -547,7 +696,7 @@ class Workspace(tk.Frame):
         self.grid.set_photos(photos, p.root, p.thumbs_dir)
         n, per = len(photos), max(1, p.photos_per_strip)
         self.lbl_count.configure(
-            text=f"共 {n} 张　·　{(n + per - 1) // per} 卷" if n else "还没有照片")
+            text=f"{n} 张 · {(n + per - 1) // per} 卷" if n else "还没有照片")
 
     def _on_sort(self, label):
         self.sort_mode = SORT_KEYS[label]
@@ -637,6 +786,25 @@ class Workspace(tk.Frame):
         self._reload_canister_menu()
         self.reload_photos()
         self.app.set_status("项目设置已保存 —— 重新生成胶卷图才会应用到胶卷图上")
+
+    def open_effects(self):
+        dlg = EffectsDialog(self, self.project, self.app.config_data)
+        result = dlg.show()
+        if result is None:
+            return
+        self.project.effects = result
+        self.project.save()
+        self._sync_fx_button()
+        on = [n for k, n, *_ in effects_mod.EFFECTS if result.get(k, 0) > 0]
+        self.app.set_status(
+            ("胶片特效已设为：" + "、".join(on) + " —— 重新生成才会应用")
+            if on else "胶片特效已全部关掉")
+
+    def _sync_fx_button(self):
+        on = [n for k, n, *_ in effects_mod.EFFECTS
+              if effects_mod.normalize(self.project.effects).get(k, 0) > 0]
+        self.btn_fx.configure(text="胶片特效…" if not on
+                              else f"胶片特效：{'、'.join(on)}")
 
     def export_all(self):
         batch_export(self, self.app,
@@ -728,6 +896,7 @@ class Workspace(tk.Frame):
         fit = p.fit_mode
         canister = p.canister
         custom = dict(p.canister_custom)
+        fx = dict(p.effects)
         library = self.app.config_data.library()
         total = len(chunks)
         root, name = p.root, p.name
@@ -758,6 +927,7 @@ class Workspace(tk.Frame):
                     cache_dir=thumbs_dir, fit_mode=fit,
                     canister=canister, canister_custom=custom,
                     canister_library=library,
+                    effects=fx,
                     progress_cb=cb)
                 f = strips_dir / f"strip_{i:03d}.jpg"
                 img.save(f, "JPEG", quality=92, subsampling=0)

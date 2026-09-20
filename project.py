@@ -95,6 +95,7 @@ class Project:
     canister_custom: dict = field(
         default_factory=lambda: dict(DEFAULT_CUSTOM_CANISTER))
     last_sort_mode: str = "added"  # 上次生成胶卷图用的排序（从画幅反查照片要用）
+    effects: dict = field(default_factory=dict)   # 胶片特效 {效果名: 0-100}
     created: str = ""
     photos: list[Photo] = field(default_factory=list)
     strips: list[str] = field(default_factory=list)
@@ -161,6 +162,7 @@ class Project:
             canister_custom={**DEFAULT_CUSTOM_CANISTER,
                              **(data.get("canister_custom") or {})},
             last_sort_mode=data.get("last_sort_mode") or "added",
+            effects=dict(data.get("effects") or {}),
             created=data.get("created", ""),
             photos=photos,
             strips=list(data.get("strips", [])),
@@ -179,6 +181,7 @@ class Project:
             "canister": self.canister,
             "canister_custom": dict(self.canister_custom),
             "last_sort_mode": self.last_sort_mode,
+            "effects": dict(self.effects),
             "photos": [vars(ph) for ph in self.photos],
             "strips": list(self.strips),
         }, ensure_ascii=False, indent=2)

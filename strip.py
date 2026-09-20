@@ -19,11 +19,13 @@
 from __future__ import annotations
 
 import math
+import zlib
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
 
 import canister as canister_mod
+import effects as effects_module
 import theme
 
 # ---------------- 配色 ----------------
@@ -236,6 +238,7 @@ def _draw_film_row(canvas, draw, paths, *, x0, y0, cols, thumb_w, thumb_h,
 
     # 画幅区
     frames_y = y0 + PERF_H + FRAME_PAD_V
+    boxes = []
     for i in range(cols):
         fx = x0 + EDGE_PAD + i * (thumb_w + FRAME_GAP)
         if i < len(paths):
@@ -243,6 +246,7 @@ def _draw_film_row(canvas, draw, paths, *, x0, y0, cols, thumb_w, thumb_h,
             canvas.paste(thumb, (fx, frames_y))
             draw.rectangle([fx - 1, frames_y - 1, fx + thumb_w, frames_y + thumb_h],
                            outline=FRAME_BORDER, width=2)
+            boxes.append((fx, frames_y, thumb_w, thumb_h))
             if progress_cb:
                 progress_cb(done + i + 1, total)
         else:
@@ -251,6 +255,8 @@ def _draw_film_row(canvas, draw, paths, *, x0, y0, cols, thumb_w, thumb_h,
             draw.rectangle([fx - 1, frames_y - 1, fx + thumb_w, frames_y + thumb_h],
                            outline=EMPTY_EDGE, width=1)
 
+    return (x0, y0, film_w, film_h), boxes
+
 
 def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS,
                  thumb_w: int = DEFAULT_THUMB_W, thumb_h: int = DEFAULT_THUMB_H,
@@ -258,6 +264,7 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
                  film_label: str = "FILM 400", cache_dir=None, fit_mode: str = "rotate",
                  canister: str = "kodak", canister_custom: dict | None = None,
                  canister_library: dict | None = None,
+                 effects: dict | None = None,
                  progress_cb=None) -> Image.Image:
     """渲染一卷胶卷总览图，返回 PIL Image。
 
@@ -267,6 +274,7 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
     canister         : 暗盒 —— 内置名 / 库里保存的 id / 老项目的 "custom"
     canister_custom  : canister="custom" 时的内联颜色（兼容老项目）
     canister_library : 用户保存的暗盒 {id: 暗盒}
+    effects          : 胶片特效 {效果名: 0-100}，见 effects.py
     progress_cb      : 可选回调 (已处理张数, 总张数)
     """
     paths = [Path(p) for p in image_paths]
@@ -309,13 +317,24 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
               font=theme.pil_font(22, "ui"), fill=FRAME_NO, anchor="lm")
 
     # ---- 逐条胶片 ----
+    row_boxes: list = []
+    frame_boxes: list = []
     for r in range(rows):
         row = paths[r * cols:(r + 1) * cols]
         y0 = HEADER_H + MARGIN + r * (film_h + ROW_GAP)
-        _draw_film_row(canvas, draw, row, x0=MARGIN, y0=y0, cols=cols,
-                       thumb_w=thumb_w, thumb_h=thumb_h,
-                       start_number=start_number + r * cols,
-                       film_label=film_label, cache_dir=cache_dir, fit_mode=fit_mode,
-                       progress_cb=progress_cb, done=r * cols, total=n)
+        rb, fb = _draw_film_row(canvas, draw, row, x0=MARGIN, y0=y0, cols=cols,
+                                thumb_w=thumb_w, thumb_h=thumb_h,
+                                start_number=start_number + r * cols,
+                                film_label=film_label, cache_dir=cache_dir,
+                                fit_mode=fit_mode,
+                                progress_cb=progress_cb, done=r * cols, total=n)
+        row_boxes.append(rb)
+        frame_boxes.extend(fb)
+
+    # ---- 胶片特效 ----
+    if effects_module.any_on(effects):
+        # 用「项目名 + 第几卷」定种子，重新生成同一卷得到的效果是一样的
+        seed = zlib.crc32(f"{project_name}:{strip_index}".encode("utf-8"))
+        canvas = effects_module.apply(canvas, effects, row_boxes, frame_boxes, seed)
 
     return canvas
