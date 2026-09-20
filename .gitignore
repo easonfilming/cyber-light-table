@@ -1,0 +1,22 @@
+# ---- 打包产物（自己跑 build_exe.py 生成，不进版本库）----
+_build/
+dist/
+*.spec
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 生成的东西 ----
+app.ico
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
