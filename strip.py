@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import math
-import zlib
+import random
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
@@ -264,7 +264,7 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
                  film_label: str = "FILM 400", cache_dir=None, fit_mode: str = "rotate",
                  canister: str = "kodak", canister_custom: dict | None = None,
                  canister_library: dict | None = None,
-                 effects: dict | None = None,
+                 effects: dict | None = None, effects_seed: int | None = None,
                  progress_cb=None) -> Image.Image:
     """渲染一卷胶卷总览图，返回 PIL Image。
 
@@ -275,6 +275,8 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
     canister_custom  : canister="custom" 时的内联颜色（兼容老项目）
     canister_library : 用户保存的暗盒 {id: 暗盒}
     effects          : 胶片特效 {效果名: 0-100}，见 effects.py
+    effects_seed     : 特效的随机种子。**不传就每次随机** —— 漏光和划痕每次
+                       生成都落在不同地方。传个固定值可以锁住（测试用）
     progress_cb      : 可选回调 (已处理张数, 总张数)
     """
     paths = [Path(p) for p in image_paths]
@@ -333,8 +335,9 @@ def render_strip(image_paths, *, start_number: int = 1, cols: int = DEFAULT_COLS
 
     # ---- 胶片特效 ----
     if effects_module.any_on(effects):
-        # 用「项目名 + 第几卷」定种子，重新生成同一卷得到的效果是一样的
-        seed = zlib.crc32(f"{project_name}:{strip_index}".encode("utf-8"))
+        # 种子默认随机 —— 每次生成漏光和划痕都落在不同地方。
+        # 传了 effects_seed 就用传进来的（测试里锁结果用）。
+        seed = effects_seed if effects_seed is not None else random.randrange(1 << 32)
         canvas = effects_module.apply(canvas, effects, row_boxes, frame_boxes, seed)
 
     return canvas
