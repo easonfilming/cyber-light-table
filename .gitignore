@@ -20,3 +20,8 @@ app.ico
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- 临时文件 ----
+_*.log
+_*_tmp.py
+
