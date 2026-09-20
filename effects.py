@@ -27,10 +27,9 @@ NAMES = [k for k, *_ in EFFECTS]
 # 互斥的效果：同一卷不可能既偏品红又偏黄绿
 EXCLUSIVE = [("lucky_r", "lucky_g")]
 
-# 漏光的颜色：芯子过曝发白，外圈才是橙红
-LEAK_CORE = (255, 252, 244)
-LEAK_MID = [(255, 196, 120), (255, 168, 84), (255, 214, 150)]
-LEAK_OUT = [(255, 112, 48), (232, 76, 40), (255, 140, 60)]
+# 漏光的颜色：饱和的红橙，不是白芯子（参考富士 X-Half 那种）
+LEAK_COLORS = [(226, 74, 40), (238, 98, 48), (208, 56, 34),
+               (244, 122, 62), (218, 86, 44)]
 
 _VIGNETTES: dict = {}
 
@@ -138,59 +137,66 @@ def _scratches(img: Image.Image, amount: int, rng: random.Random) -> Image.Image
     return img
 
 
-def _band_mask(size, x_center: float, width: float, angle: float) -> Image.Image:
-    """一条斜光带的遮罩。x_center / width 按图片宽度算，angle 是倾角（度）。"""
-    w, h = size
+def _blob_mask(size, cx, cy, rx, ry, rng, lumps=3):
+    """一团边缘不规则的椭圆遮罩：几个椭圆叠一起再糊一下。
+
+    最后把峰值拉到 255 —— 糊过之后峰值会掉到一半以下，
+    直接拿去当透明度用的话颜色只上一半，漏光会淡得看不见。
+    """
     m = Image.new("L", size, 0)
-    ImageDraw.Draw(m).rectangle(
-        [x_center - width / 2, -h, x_center + width / 2, h * 2], fill=255)
-    if abs(angle) > 0.1:
-        m = m.rotate(angle, resample=Image.Resampling.BICUBIC)
+    d = ImageDraw.Draw(m)
+    for _ in range(max(1, lumps)):
+        ox = rng.uniform(-0.35, 0.35) * rx
+        oy = rng.uniform(-0.45, 0.45) * ry
+        r1 = rx * rng.uniform(0.45, 0.78)
+        r2 = ry * rng.uniform(0.45, 0.78)
+        d.ellipse([cx + ox - r1, cy + oy - r2, cx + ox + r1, cy + oy + r2], fill=255)
+    m = m.filter(ImageFilter.GaussianBlur(max(3.0, min(rx, ry) * 0.28)))
+    peak = m.getextrema()[1]
+    if peak > 0:
+        m = m.point(lambda v: min(255, int(v * 255 / peak)))
     return m
 
 
-def _leak_layer(size, amount: int, rng: random.Random) -> Image.Image:
-    """漏光层：从某一侧射进来的一道强光。
+def _leak_layer(size, amount: int, rng: random.Random, film_box=None) -> Image.Image:
+    """漏光层：一片边缘很柔的红橙光雾。
 
-    两个关键点：
-      1. **芯子过曝发白、中圈琥珀、外圈才橙红** —— 只有暖色就成了一片滤镜
-      2. **光带要窄、糊的半径要跟带宽成比例** —— 按图宽算的话会糊成一大片渐变，
-         就不像"从缝里射进来"了
+    参考富士 X-Half 的漏光 —— **不是一道细光带，是一大片糊开的红橙色**，
+    横向拉长、没有白芯子，而且区域和大小纯随机：
+    可以横跨整个画面，也可以只是偏在角落的一小块。
+
+    film_box 是胶片区域的包围盒 —— 位置只在胶片范围内随机，
+    否则光团可能落在暗盒带那片空白里，漏了等于没漏。
     """
     w, h = size
     layer = Image.new("RGB", size, (0, 0, 0))
+    fx, fy, fw, fh = film_box if film_box else (0, 0, w, h)
 
-    side = rng.choice(["left", "right", "left"])
-    if side == "left":
-        base = w * rng.uniform(-0.01, 0.10)
-        angle = rng.uniform(6, 18)
-    else:
-        base = w * rng.uniform(0.90, 1.01)
-        angle = -rng.uniform(6, 18)
+    # 主光团：横向拉长，位置和大小都随机
+    bw = fw * rng.uniform(0.35, 1.30)         # 宽：从一段到横跨整幅
+    bh = fh * rng.uniform(0.15, 0.55)         # 高：从一条到一大片
+    cx = fx + fw * rng.uniform(-0.05, 1.05)
+    cy = fy + fh * rng.uniform(0.04, 0.96)
+    color = rng.choice(LEAK_COLORS)
 
-    def paint(band_w, color, blur_ratio):
-        m = _band_mask(size, base, band_w, angle) \
-            .filter(ImageFilter.GaussianBlur(max(3.0, band_w * blur_ratio)))
-        return Image.composite(Image.new("RGB", size, color), layer, m)
+    mask = _blob_mask(size, cx, cy, bw / 2, bh / 2, rng,
+                      lumps=rng.randint(2, 4))
+    layer = Image.composite(Image.new("RGB", size, color), layer, mask)
 
-    # 光带宽度按**图高**算（胶片是一条条横的，漏光横着扫过好几条）
-    out_w = h * rng.uniform(0.16, 0.30)
-    layer = paint(out_w, rng.choice(LEAK_OUT), 0.30)          # 外圈：橙红
-    layer = paint(out_w * 0.55, rng.choice(LEAK_MID), 0.22)   # 中圈：琥珀
-    layer = paint(max(5.0, out_w * 0.16), LEAK_CORE, 0.10)    # 芯子：过曝发白
-
-    # 有时候再来一道细的，像另一条缝
-    if rng.random() < 0.6:
-        b2 = base + w * rng.uniform(0.05, 0.16) * (1 if side == "left" else -1)
-        w2 = h * rng.uniform(0.03, 0.08)
-        m2 = _band_mask(size, b2, w2, angle * rng.uniform(0.4, 1.4)) \
-            .filter(ImageFilter.GaussianBlur(max(2.0, w2 * 0.35)))
+    # 有时候旁边再带一小团，像光从别处也渗进来一点
+    if rng.random() < 0.5:
+        bw2 = bw * rng.uniform(0.18, 0.45)
+        bh2 = bh * rng.uniform(0.25, 0.6)
+        cx2 = cx + rng.uniform(-1.1, 1.1) * bw / 2
+        cy2 = cy + rng.uniform(-1.2, 1.2) * bh / 2
+        m2 = _blob_mask(size, cx2, cy2, bw2 / 2, bh2 / 2, rng, lumps=2)
         layer = ImageChops.screen(
-            layer, Image.composite(Image.new("RGB", size, LEAK_MID[0]),
+            layer, Image.composite(Image.new("RGB", size, rng.choice(LEAK_COLORS)),
                                    Image.new("RGB", size, (0, 0, 0)), m2))
 
+    # 光是**加上去**的，所以用 screen：暗部会被点亮成红橙，亮部还是亮
     return Image.blend(Image.new("RGB", size, (0, 0, 0)), layer,
-                       min(1.0, amount / 100.0 * 1.25))
+                       min(1.0, amount / 100.0 * 1.15))
 
 
 # 乐凯偏色：通道增益 + 暗部染的色雾（片基本身带色，暗部最明显）
@@ -256,7 +262,15 @@ def apply(canvas: Image.Image, spec, rows, frames, seed: int = 0) -> Image.Image
 
     # ---- 整条：漏光（放最后，光要压在所有东西上面）----
     if spec["leak"] > 0:
-        layer = _leak_layer(canvas.size, spec["leak"], rng)
+        # 胶片区域的包围盒 —— 光团只在这块里随机，不然可能落在空白处白漏
+        film_box = None
+        if rows:
+            xs = [b[0] for b in rows]
+            ys = [b[1] for b in rows]
+            film_box = (min(xs), min(ys),
+                        max(b[0] + b[2] for b in rows) - min(xs),
+                        max(b[1] + b[3] for b in rows) - min(ys))
+        layer = _leak_layer(canvas.size, spec["leak"], rng, film_box)
         rows_mask = Image.new("L", canvas.size, 0)
         md = ImageDraw.Draw(rows_mask)
         for x, y, w, h in rows:
