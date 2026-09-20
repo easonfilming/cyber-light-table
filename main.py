@@ -455,8 +455,9 @@ class EffectsDialog(tk.Toplevel):
         for key, name, desc, _default in effects_mod.EFFECTS:
             row = tk.Frame(body, bg=theme.BG)
             row.pack(fill="x", pady=(12, 0))
+            # width 按字体平均字符宽算，中文是双宽 —— 3 个汉字要 width>=6 才不被截
             tk.Label(row, text=name, bg=theme.BG, fg=theme.TEXT, font=theme.FONT_UI,
-                     width=4, anchor="w").pack(side="left")
+                     width=7, anchor="w").pack(side="left")
             var = tk.IntVar(value=cur[key])
             self.vars[key] = var
             tk.Scale(row, from_=0, to=100, orient="horizontal", variable=var,
