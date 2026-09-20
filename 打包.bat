@@ -1,20 +1,19 @@
 @echo off
-chcp 65001 >nul
+rem Build Cyber Light Table into a single-file exe.
+rem First run creates a temp virtualenv and downloads PyInstaller, so it is slower.
+setlocal
 cd /d "%~dp0"
 
 where python >nul 2>nul
-if %errorlevel%==0 (
-    set "PY=python"
-) else (
+if errorlevel 1 (
     set "PY=py"
+) else (
+    set "PY=python"
 )
 
 echo.
-echo   正在打包「赛博观片台」...
-echo   （第一次要建虚拟环境、下载 PyInstaller，会慢一点）
+echo   Building Cyber Light Table ...
 echo.
-
 %PY% build_exe.py %*
-
 echo.
 pause
